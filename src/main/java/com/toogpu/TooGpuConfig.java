@@ -51,4 +51,36 @@ public interface TooGpuConfig extends Config
 	default int expandedMapLoadingChunks() {
 		return 3;
 	}
+
+	String KEY_UNLOCK_FPS = "unlockFps";
+	@ConfigItem(
+			keyName = KEY_UNLOCK_FPS,
+			name = "Unlock FPS",
+			description = "Removes the 50 FPS cap for some game content, such as camera movement and dynamic lighting.",
+			position = 2,
+			section = generalSettings
+	)
+	default boolean unlockFps()
+	{
+		return false;
+	}
+
+	String KEY_FPS_TARGET = "fpsTarget";
+	@ConfigItem(
+			keyName = KEY_FPS_TARGET,
+			name = "FPS Target",
+			description =
+					"Controls the maximum number of frames per second.<br>" +
+							"This setting only applies if Unlock FPS is enabled, and VSync Mode is set to 'off'.",
+			position = 3,
+			section = generalSettings
+	)
+	@Range(
+			min = 0,
+			max = 999
+	)
+	default int fpsTarget()
+	{
+		return 60;
+	}
 }

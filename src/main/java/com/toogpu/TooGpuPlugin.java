@@ -31,10 +31,8 @@ import com.google.inject.Provides;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.*;
-import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.hooks.DrawCallbacks;
 import net.runelite.client.config.ConfigManager;
-import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.callback.ClientThread;
@@ -42,15 +40,15 @@ import javax.swing.SwingUtilities;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.rlawt.AWTContext;
+import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.*;
 import org.lwjgl.opengl.GLCapabilities;
 import org.lwjgl.system.Callback;
 import org.lwjgl.system.Configuration;
 import java.awt.Canvas;
-import java.util.Arrays;
-import java.util.HashMap;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
 import java.util.List;
-import java.util.Map;
 
 import static org.lwjgl.opengl.GL43C.*;
 
@@ -80,8 +78,103 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	private boolean lwjglInitialized;
 	private Callback debugCallback;
 
+	public InterfaceStuff interfaceStuff;
+
+	private class InterfaceStuff {
+		private int pixelBufferObject;
+		private int texture;
+
+		private int canvasWidth;
+		private int canvasHeight;
+		private int vertexArrayObject;
+		private int vertexBufferObject;
+
+		public InterfaceStuff() {
+			pixelBufferObject = glGenBuffers();
+			texture = glGenTextures();
+
+			glBindTexture(GL_TEXTURE_2D, texture);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glBindTexture(GL_TEXTURE_2D, 0);
+
+			vertexArrayObject = glGenVertexArrays();
+			vertexBufferObject = glGenBuffers();
+
+			glBindVertexArray(vertexArrayObject);
+			FloatBuffer vboUiData = BufferUtils.createFloatBuffer(5 * 4)
+					.put(new float[] {
+							// vertices, UVs
+							1, 1, 0, 1, 0, // top right
+							1, -1, 0, 1, 1, // bottom right
+							-1, -1, 0, 0, 1, // bottom left
+							-1, 1, 0, 0, 0  // top left
+					})
+					.flip();
+			glBindBuffer(GL_ARRAY_BUFFER, vertexBufferObject);
+			glBufferData(GL_ARRAY_BUFFER, vboUiData, GL_STATIC_DRAW);
+
+			// position attribute
+			glVertexAttribPointer(0, 3, GL_FLOAT, false, 5 * Float.BYTES, 0);
+			glEnableVertexAttribArray(0);
+
+			// texture coord attribute
+			glVertexAttribPointer(1, 2, GL_FLOAT, false, 5 * Float.BYTES, 3 * Float.BYTES);
+			glEnableVertexAttribArray(1);
+			glBindVertexArray(0);
+		}
+
+		public void destroy() {
+			glDeleteBuffers(pixelBufferObject);
+			pixelBufferObject = 0;
+
+			glDeleteTextures(texture);
+			texture = 0;
+
+			glDeleteVertexArrays(vertexArrayObject);
+			vertexArrayObject = 0;
+
+			glDeleteBuffers(vertexBufferObject);
+			vertexBufferObject = 0;
+		}
+
+		public void copyInterfaceTextureToGlTexture(int canvasWidth, int canvasHeight) {
+			if (canvasWidth != this.canvasWidth || canvasHeight != this.canvasHeight) {
+				this.canvasWidth  = canvasWidth;
+				this.canvasHeight = canvasHeight;
+
+				glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pixelBufferObject);
+				glBufferData(GL_PIXEL_UNPACK_BUFFER, canvasWidth * canvasHeight * 4L, GL_STREAM_DRAW);
+				glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+				glBindTexture(GL_TEXTURE_2D, texture);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, canvasWidth, canvasHeight, 0, GL_BGRA, GL_UNSIGNED_BYTE, 0);
+				glBindTexture(GL_TEXTURE_2D, 0);
+			}
+			final BufferProvider bufferProvider = client.getBufferProvider();
+			final int[] pixels = bufferProvider.getPixels();
+			final int width = bufferProvider.getWidth();
+			final int height = bufferProvider.getHeight();
+
+			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pixelBufferObject);
+			ByteBuffer mappedBuffer = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+			if (mappedBuffer == null) {
+				log.error("Unable to map interface PBO. Skipping UI...");
+			} else {
+				mappedBuffer.asIntBuffer().put(pixels, 0, width * height);
+				glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+				glBindTexture(GL_TEXTURE_2D, texture);
+				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0);
+			}
+			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+	}
+
 	@Override
-	protected void startUp() throws Exception
+	protected void startUp()
 	{
 		clientThread.invoke(() -> {
 			try {
@@ -173,6 +266,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 					client.setGameState(GameState.LOADING);
 
 				checkGLErrors();
+
+				setupSyncMode();
+
+				interfaceStuff = new InterfaceStuff();
 			}
 			catch (Throwable err)
 			{
@@ -181,38 +278,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			}
 			return true;
 		});
-	}
-
-	public void checkGLErrors() {
-		if (!log.isDebugEnabled())
-			return;
-
-		while (true) {
-			int err = glGetError();
-			if (err == GL_NO_ERROR)
-				return;
-
-			String errStr;
-			switch (err) {
-				case GL_INVALID_ENUM:
-					errStr = "INVALID_ENUM";
-					break;
-				case GL_INVALID_VALUE:
-					errStr = "INVALID_VALUE";
-					break;
-				case GL_INVALID_OPERATION:
-					errStr = "INVALID_OPERATION";
-					break;
-				case GL_INVALID_FRAMEBUFFER_OPERATION:
-					errStr = "INVALID_FRAMEBUFFER_OPERATION";
-					break;
-				default:
-					errStr = String.valueOf(err);
-					break;
-			}
-
-			log.debug("glGetError:", new Exception(errStr));
-		}
 	}
 
 	@Override
@@ -242,10 +307,12 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				lwjglInitialized = false;
 				waitUntilIdle();
 
+				if (interfaceStuff != null) interfaceStuff.destroy();
+
 				/*textureManager.shutDown();
 
 				destroyBuffers();
-				destroyInterfaceTexture();
+
 				destroyPrograms();
 				destroyVaos();
 				destroySceneFbo();
@@ -287,6 +354,60 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		});
 	}
 
+	private void setupSyncMode()
+	{
+		final boolean unlockFps = config.unlockFps();
+		client.setUnlockedFps(unlockFps);
+
+		int swapInterval;
+
+		if (unlockFps) {
+			swapInterval = -1;
+		} else {
+			swapInterval = 0;
+		}
+
+		int actualSwapInterval = awtContext.setSwapInterval(swapInterval);
+		if (actualSwapInterval != swapInterval) {
+			log.info("unsupported swap interval {}, got {}", swapInterval, actualSwapInterval);
+		}
+
+		client.setUnlockedFpsTarget(actualSwapInterval == 0 ? config.fpsTarget() : 0);
+		checkGLErrors();
+	}
+
+	public void checkGLErrors() {
+		if (!log.isDebugEnabled())
+			return;
+
+		while (true) {
+			int err = glGetError();
+			if (err == GL_NO_ERROR)
+				return;
+
+			String errStr;
+			switch (err) {
+				case GL_INVALID_ENUM:
+					errStr = "INVALID_ENUM";
+					break;
+				case GL_INVALID_VALUE:
+					errStr = "INVALID_VALUE";
+					break;
+				case GL_INVALID_OPERATION:
+					errStr = "INVALID_OPERATION";
+					break;
+				case GL_INVALID_FRAMEBUFFER_OPERATION:
+					errStr = "INVALID_FRAMEBUFFER_OPERATION";
+					break;
+				default:
+					errStr = String.valueOf(err);
+					break;
+			}
+
+			log.debug("glGetError:", new Exception(errStr));
+		}
+	}
+
 	private void waitUntilIdle() {
 		//if (computeMode == ComputeMode.OPENCL)
 		//	openCLManager.finish();
@@ -309,6 +430,14 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		});
 
 		shutDown();
+	}
+
+	public void restartPlugin() {
+		// For some reason, it's necessary to delay this like below to prevent the canvas from locking up on Linux
+		SwingUtilities.invokeLater(() -> clientThread.invokeLater(() -> {
+			shutDown();
+			clientThread.invokeLater(this::startUp);
+		}));
 	}
 
 	@Provides
@@ -334,7 +463,56 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 	@Override
 	public void draw(int overlayColor) {
+		final GameState gameState = client.getGameState();
+		if (gameState == GameState.STARTING) {
+			return;
+		}
 
+		final int canvasWidth = client.getCanvasWidth();
+		final int canvasHeight = client.getCanvasHeight();
+
+		try {
+			interfaceStuff.copyInterfaceTextureToGlTexture(canvasWidth, canvasHeight);
+		} catch (Exception ex) {
+			// Fixes: https://github.com/runelite/runelite/issues/12930
+			// Gracefully Handle loss of opengl buffers and context
+			log.warn("copyInterfaceTextureToGlTexture exception", ex);
+			restartPlugin();
+			return;
+		}
+
+		{ // Draw ui
+			glEnable(GL_BLEND);
+
+			glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+			glBindTexture(GL_TEXTURE_2D, interfaceStuff.texture);
+
+			//glUseProgram(interfaceStuff.program);
+
+			glBindVertexArray(interfaceStuff.vertexArrayObject);
+			//glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+			glBindVertexArray(0);
+			glUseProgram(0);
+		}
+
+
+
+		try {
+			awtContext.swapBuffers();
+			//drawManager.processDrawComplete(this::screenshot);
+		} catch (RuntimeException ex) {
+			// this is always fatal
+			if (!canvas.isValid()) {
+				// this might be AWT shutting down on VM shutdown, ignore it
+				return;
+			}
+
+			log.error("Unable to swap buffers:", ex);
+		}
+
+		glBindFramebuffer(GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
+
+		checkGLErrors();
 	}
 
 	@Override
@@ -364,6 +542,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 	@Override
 	public boolean tileInFrustum(Scene scene, int pitchSin, int pitchCos, int yawSin, int yawCos, int cameraX, int cameraY, int cameraZ, int plane, int msx, int msy) {
-		return DrawCallbacks.super.tileInFrustum(scene, pitchSin, pitchCos, yawSin, yawCos, cameraX, cameraY, cameraZ, plane, msx, msy);
+		return true;
 	}
 }
