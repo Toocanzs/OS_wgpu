@@ -21,6 +21,8 @@ dependencies {
 	testImplementation 'junit:junit:4.12'
 	testImplementation group: 'net.runelite', name:'client', version: runeLiteVersion
 	testImplementation group: 'net.runelite', name:'jshell', version: runeLiteVersion
+	//implementation group: 'net.java.dev.jna', name: 'jna', version: '5.14.0'
+	implementation group: 'com.nativelibs4java', name: 'bridj', version: '0.7.0'
 }
 
 group = 'com.example'
