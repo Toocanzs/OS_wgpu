@@ -39,18 +39,31 @@ import net.runelite.client.callback.ClientThread;
 import javax.swing.SwingUtilities;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.PluginInstantiationException;
+import net.runelite.client.ui.ClientUI;
 import net.runelite.rlawt.AWTContext;
+import org.bridj.BridJ;
+import org.bridj.IntValuedEnum;
+import org.bridj.Pointer;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.*;
 import org.lwjgl.opengl.GLCapabilities;
 import org.lwjgl.system.Callback;
 import org.lwjgl.system.Configuration;
 import java.awt.Canvas;
+import java.io.File;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.List;
 
+import wgpu.*;
+import wgpu.windows.WindowsUtils;
+
+import static org.lwjgl.opengl.GL11C.glBindTexture;
 import static org.lwjgl.opengl.GL43C.*;
+import static wgpu.WgpuLibrary.*;
 
 @Slf4j
 @PluginDescriptor(
@@ -70,6 +83,8 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	private ClientThread clientThread;
 	@Inject
 	private PluginManager pluginManager;
+	@Inject
+	private ClientUI clientUI;
 
 	public GLCapabilities glCaps;
 
@@ -79,6 +94,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	private Callback debugCallback;
 
 	public InterfaceStuff interfaceStuff;
+	private long lastFrameTimeMillis;
 
 	private class InterfaceStuff {
 		private int pixelBufferObject;
@@ -140,7 +156,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			vertexBufferObject = 0;
 		}
 
-		public void copyInterfaceTextureToGlTexture(int canvasWidth, int canvasHeight) {
+		public void copyInterfaceTextureToGpu(int canvasWidth, int canvasHeight) {
 			if (canvasWidth != this.canvasWidth || canvasHeight != this.canvasHeight) {
 				this.canvasWidth  = canvasWidth;
 				this.canvasHeight = canvasHeight;
@@ -166,12 +182,38 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				mappedBuffer.asIntBuffer().put(pixels, 0, width * height);
 				glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
 				glBindTexture(GL_TEXTURE_2D, texture);
+				// NOTE: with an unpack buffer bound pixels(last param) is treated as an offset into the unpack buffer
 				glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 0);
 			}
 			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 			glBindTexture(GL_TEXTURE_2D, 0);
 		}
 	}
+
+	private int interfaceProgram; // TODO: Refactor
+
+	private static String pointerToString(Pointer<Byte> b) {
+		return b.getString(Pointer.StringType.C);
+	}
+
+	public class AdapterRequester extends WGPURequestAdapterCallback {
+
+		@Override
+		public void apply(IntValuedEnum<WGPURequestAdapterStatus> status, WGPUAdapter adapter, Pointer<Byte> message, Pointer<?> userdata) {
+			WGPUAdapterProperties properties = new WGPUAdapterProperties();
+			wgpuAdapterGetProperties(adapter, Pointer.getPointer(properties));
+
+			log.info(String.format("Adapter: %s", pointerToString(properties.name())));
+			log.info(String.format("\tVendor Name: %s", pointerToString(properties.vendorName())));
+			log.info(String.format("\tVendor Id: %d", properties.vendorID()));
+			log.info(String.format("\tArchitecture: %s", pointerToString(properties.architecture())));
+			log.info(String.format("\tVendor Name: %d", properties.deviceID()));
+			log.info(String.format("\tType: %s", properties.adapterType().toString()));
+			log.info(String.format("\tChosen Backend: %s", properties.backendType().toString()));
+		}
+	}
+
+	AdapterRequester adapterRequester = new AdapterRequester();
 
 	@Override
 	protected void startUp()
@@ -192,7 +234,40 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 				awtContext.createGLContext();
 
+				int version = MyLibrary.INSTANCE.wgpuGetVersion();
+				log.info("wgpu VERSION: " + version);
+
 				canvas.setIgnoreRepaint(true);
+
+				{
+					String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/wgpu_native.dll").getPath();
+					File dllFile = new File(dllPath);
+					BridJ.setNativeLibraryFile("wgpu", dllFile);
+					BridJ.register();
+
+					log.info("Loaded wgpu. Version:" + wgpuGetVersion());
+
+					WGPUInstanceDescriptor descriptor = new WGPUInstanceDescriptor();
+					WgpuLibrary.WGPUInstance instance = wgpuCreateInstance(Pointer.getPointer(descriptor));
+
+					log.info("got instance? " + (instance.get() != null));
+					WGPUSurfaceDescriptorFromWindowsHWND windowsDescriptor = WindowsUtils.getWindowsSurfaceDescriptor(clientUI);
+					WGPUSurfaceDescriptor surfaceDescriptor = new WGPUSurfaceDescriptor();
+
+					surfaceDescriptor.nextInChain(Pointer.getPointer(windowsDescriptor).as(WGPUChainedStruct.class));
+					WGPUSurface surface = wgpuInstanceCreateSurface(instance, Pointer.getPointer(surfaceDescriptor));
+					log.info("created surface");
+
+					log.info("Requesting adapters...");
+					WGPURequestAdapterOptions options = new WGPURequestAdapterOptions();
+					wgpuInstanceRequestAdapter(instance, Pointer.getPointer(options), adapterRequester.toPointer(), Pointer.NULL);
+					log.info("Requested adapters");
+
+					wgpuSurfaceRelease(surface);
+					wgpuInstanceRelease(instance);
+					if(true) return true;
+
+				}
 
 				// lwjgl defaults to lwjgl- + user.name, but this breaks if the username would cause an invalid path
 				// to be created.
@@ -270,6 +345,68 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				setupSyncMode();
 
 				interfaceStuff = new InterfaceStuff();
+
+				{ // TODO: refactor
+					String vertexSource = null;
+					String fragmentSource = null;
+					String shaderPathString = System.getenv().get("TOOGPU_SHADER_PATH");
+					assert shaderPathString != null && !shaderPathString.equals("");
+					//TODO: Paths.get(TooGpuPlugin.class)
+					try {
+						vertexSource = Files.readString(Paths.get(shaderPathString, "ui/ui_vert.glsl"));
+						fragmentSource = Files.readString(Paths.get(shaderPathString, "ui/ui_frag.glsl"));
+					} catch (IOException e) {
+						log.error(e.toString());
+						stopPlugin();
+						return true;
+					}
+					assert vertexSource != null;
+					assert fragmentSource != null;
+
+					int vertexShader = glCreateShader(GL_VERTEX_SHADER);
+					glShaderSource(vertexShader, vertexSource);
+					boolean compiledVertex = compileShader(vertexShader);
+					if (!compiledVertex) {
+						glDeleteShader(vertexShader);
+						stopPlugin();
+						return true;
+					}
+
+					int fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+
+					glShaderSource(fragmentShader, fragmentSource);
+					boolean compiledFragment = compileShader(fragmentShader);
+					if (!compiledFragment) {
+						glDeleteShader(fragmentShader);
+						stopPlugin();
+						return true;
+					}
+
+					interfaceProgram = glCreateProgram();
+
+					glAttachShader(interfaceProgram, vertexShader);
+					glAttachShader(interfaceProgram, fragmentShader);
+					boolean linked = linkProgram(interfaceProgram);
+					if (!linked) {
+						// linkProgram deletes programs for us if they fail
+						glDeleteShader(vertexShader);
+						glDeleteShader(fragmentShader);
+						stopPlugin();
+						return true;
+					}
+
+					glDeleteShader(vertexShader);
+					glDeleteShader(fragmentShader);
+
+					int uniUiTexture = glGetUniformLocation(interfaceProgram, "ui_texture"); // TODO: remove
+					glUseProgram(interfaceProgram);
+					glUniform1i(uniUiTexture, 0); // Set to texture unit 0
+					glUseProgram(0);
+				}
+
+				lastFrameTimeMillis = System.currentTimeMillis();
+
+				checkGLErrors();
 			}
 			catch (Throwable err)
 			{
@@ -279,6 +416,36 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			return true;
 		});
 	}
+
+	boolean linkProgram(int program) { // TODO: Refactor
+		// NOTE: Assumes that you've already attached shaders to this program (glAttachShader)
+		glLinkProgram(interfaceProgram);
+		int[] isLinked = new int[1];
+		glGetProgramiv(program, GL_LINK_STATUS, isLinked);
+		if (isLinked[0] == GL_FALSE) {
+			String errorLog = glGetProgramInfoLog(program);
+			log.error("Error linking program: " + errorLog);
+			glDeleteProgram(program);
+			return false;
+		}
+		return true;
+	}
+
+	boolean compileShader(int shader) { // TODO: Refactor
+		// NOTE: assumes you've already attached shader source to this shader (glShaderSource)
+		glCompileShader(shader);
+		int[] isCompiled = new int[1];
+		glGetShaderiv(shader, GL_COMPILE_STATUS, isCompiled);
+		if(isCompiled[0] == GL_FALSE)
+		{
+			String errorLog = glGetShaderInfoLog(shader);
+			log.error("Error compiling shader:" + errorLog);
+			glDeleteShader(shader);
+			return false;
+		}
+		return true;
+	}
+
 
 	@Override
 	protected void shutDown()
@@ -308,6 +475,8 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				waitUntilIdle();
 
 				if (interfaceStuff != null) interfaceStuff.destroy();
+
+				glDeleteProgram(interfaceProgram);
 
 				/*textureManager.shutDown();
 
@@ -468,11 +637,17 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 
+		float deltaTime = (float) ((System.currentTimeMillis() - lastFrameTimeMillis) / 1000.);
+
+		glClearColor(0f,0f,0f,1f); // TODO: Fog color
+		glClearDepthf(0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
 		final int canvasWidth = client.getCanvasWidth();
 		final int canvasHeight = client.getCanvasHeight();
 
 		try {
-			interfaceStuff.copyInterfaceTextureToGlTexture(canvasWidth, canvasHeight);
+			interfaceStuff.copyInterfaceTextureToGpu(canvasWidth, canvasHeight);
 		} catch (Exception ex) {
 			// Fixes: https://github.com/runelite/runelite/issues/12930
 			// Gracefully Handle loss of opengl buffers and context
@@ -481,21 +656,25 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 
-		{ // Draw ui
+		{ // Draw ui // TODO: Refactor
 			glEnable(GL_BLEND);
-
 			glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+
+			// Set interface texture to unit 0
+			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, interfaceStuff.texture);
 
-			//glUseProgram(interfaceStuff.program);
-
+			glUseProgram(interfaceProgram);
 			glBindVertexArray(interfaceStuff.vertexArrayObject);
-			//glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+			glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+
 			glBindVertexArray(0);
 			glUseProgram(0);
+			glBindTexture(GL_TEXTURE_2D, 0);
+
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDisable(GL_BLEND);
 		}
-
-
 
 		try {
 			awtContext.swapBuffers();

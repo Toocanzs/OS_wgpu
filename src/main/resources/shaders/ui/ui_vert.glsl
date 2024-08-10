@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018, Adam <Adam@sigterm.info>
+ * Copyright (c) 2024, Toocanzs <https://github.com/Toocanzs>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,12 +25,12 @@
  */
 #version 430
 
-layout (location = 0) in vec3 in_position;
-layout (location = 1) in vec2 in_texcoord;
-out vec2 out_texcoord;
+layout (location = 0) in vec3 vert_position;
+layout (location = 1) in vec2 vert_texcoord;
+out vec2 frag_texcoord;
 
 void main()
 {
-    gl_Position = vec4(in_position, 1.0);
-    out_texcoord = in_texcoord;
+    gl_Position = vec4(vert_position, 1.0);
+    frag_texcoord = vert_texcoord;
 }

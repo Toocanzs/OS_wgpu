@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2018, Adam <Adam@sigterm.info>
+ * Copyright (c) 2024, Toocanzs <https://github.com/Toocanzs>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,21 +30,22 @@ uniform sampler2D ui_texture;
 //uniform float colorBlindnessIntensity;
 //uniform vec4 alphaOverlay;
 
-in vec2 in_texcoord;
+in vec2 frag_texcoord;
 
-out vec4 out_frag_color;
+out vec4 frag_color;
 
-vec4 alphaBlend(vec4 src, vec4 dst) {
-    return vec4(
-        src.rgb + dst.rgb * (1.0f - src.a),
-        src.a + dst.a * (1.0f - src.a)
-    );
-}
+/*vec4 alphaBlend(vec4 src, vec4 dst) {
+    //return vec4(
+    //    src.rgb + dst.rgb * (1.0f - src.a),
+    //    src.a + dst.a * (1.0f - src.a)
+    //);
+    return src + dst * vec4(1.0f - src.a);
+}*/
 
 void main() {
-    vec4 ui_color = texture(ui_texture, in_texcoord);
+    vec4 ui_color = texture(ui_texture, frag_texcoord);
     //c = alphaBlend(c, alphaOverlay);
     //c.rgb = colorBlindnessCompensation(c.rgb);
 
-    out_frag_color = ui_color;
+    frag_color = ui_color;
 }
