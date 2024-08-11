@@ -44,25 +44,21 @@ import net.runelite.rlawt.AWTContext;
 import org.bridj.BridJ;
 import org.bridj.IntValuedEnum;
 import org.bridj.Pointer;
-import org.lwjgl.BufferUtils;
-import org.lwjgl.opengl.*;
-import org.lwjgl.opengl.GLCapabilities;
-import org.lwjgl.system.Callback;
-import org.lwjgl.system.Configuration;
+//import org.lwjgl.BufferUtils;
+//import org.lwjgl.opengl.GLCapabilities;
+//import org.lwjgl.system.Callback;
+
 import java.awt.Canvas;
 import java.io.File;
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
-import java.nio.file.Files;
-import java.nio.file.Paths;
-import java.util.List;
+import java.util.ArrayList;
 
 import wgpu.*;
 import wgpu.windows.WindowsUtils;
 
-import static org.lwjgl.opengl.GL11C.glBindTexture;
-import static org.lwjgl.opengl.GL43C.*;
+//import static org.lwjgl.opengl.GL11C.glBindTexture;
+//import static org.lwjgl.opengl.GL43C.*;
 import static wgpu.WgpuLibrary.*;
 
 @Slf4j
@@ -86,15 +82,70 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	@Inject
 	private ClientUI clientUI;
 
-	public GLCapabilities glCaps;
+	//public GLCapabilities glCaps;
 
 	private Canvas canvas;
 	private AWTContext awtContext;
-	private boolean lwjglInitialized;
-	private Callback debugCallback;
+	private boolean webgpuInitialized;
+	//private Callback debugCallback;
 
 	public InterfaceStuff interfaceStuff;
 	private long lastFrameTimeMillis;
+	private WGPUAdapter adapter;
+	private SurfaceStuff surfaceStuff;
+	private class SurfaceStuff {
+		public WGPUSurface surface;
+		public int surfaceWidth;
+		public int surfaceHeight;
+
+		public SurfaceStuff(WGPUInstance instance) {
+			surfaceHeight = 0;
+			surfaceWidth = 0;
+			WGPUSurfaceDescriptorFromWindowsHWND windowsDescriptor = WindowsUtils.getWindowsSurfaceDescriptor(clientUI, awtContext);
+			WGPUSurfaceDescriptor surfaceDescriptor = new WGPUSurfaceDescriptor();
+			surfaceDescriptor.nextInChain(Pointer.getPointer(windowsDescriptor).as(WGPUChainedStruct.class));
+
+			surface = wgpuInstanceCreateSurface(instance, Pointer.getPointer(surfaceDescriptor));
+		}
+
+		public void configureSurface(WGPUDevice device, WGPUAdapter adapter, int canvasWidth, int canvasHeight, boolean forceReconfigure) {
+			boolean changedSize = surfaceWidth != canvasWidth || surfaceHeight != canvasHeight;
+			if (changedSize || forceReconfigure) {
+				IntValuedEnum<WGPUTextureFormat> preferredFormat = wgpuSurfaceGetPreferredFormat(surface, adapter);
+				log.info("preferredFormat=" + preferredFormat);
+
+				WGPUSurfaceConfiguration configuration = new WGPUSurfaceConfiguration();
+				configuration.device(device);
+				configuration.format(preferredFormat);
+				configuration.usage((int) WGPUTextureUsage.WGPUTextureUsage_RenderAttachment.value);
+				configuration.viewFormatCount(0);
+				configuration.viewFormats((Pointer<IntValuedEnum<WGPUTextureFormat>>)Pointer.NULL);
+				configuration.alphaMode(WGPUCompositeAlphaMode.WGPUCompositeAlphaMode_Auto);
+				configuration.width(canvasWidth);
+				surfaceWidth = canvasWidth;
+				configuration.height(canvasHeight);
+				surfaceHeight = canvasHeight;
+				configuration.presentMode(WGPUPresentMode.WGPUPresentMode_Fifo); // TODO: Get from config
+				wgpuSurfaceConfigure(surface, Pointer.getPointer(configuration));
+				log.info("Configured surface");
+			}
+		}
+
+		public void destroy() {
+			if (surface != null) {
+				wgpuSurfaceUnconfigure(surface);
+				wgpuSurfaceRelease(surface);
+			}
+			surface = null;
+			surfaceHeight = 0;
+			surfaceWidth = 0;
+		}
+
+	}
+	private WGPUInstance instance;
+	private WGPUDevice device;
+	private WGPUQueue queue;
+
 
 	private class InterfaceStuff {
 		private int pixelBufferObject;
@@ -106,7 +157,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		private int vertexBufferObject;
 
 		public InterfaceStuff() {
-			pixelBufferObject = glGenBuffers();
+			/*pixelBufferObject = glGenBuffers();
 			texture = glGenTextures();
 
 			glBindTexture(GL_TEXTURE_2D, texture);
@@ -139,10 +190,11 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			// texture coord attribute
 			glVertexAttribPointer(1, 2, GL_FLOAT, false, 5 * Float.BYTES, 3 * Float.BYTES);
 			glEnableVertexAttribArray(1);
-			glBindVertexArray(0);
+			glBindVertexArray(0);*/
 		}
 
 		public void destroy() {
+			/*
 			glDeleteBuffers(pixelBufferObject);
 			pixelBufferObject = 0;
 
@@ -153,10 +205,11 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			vertexArrayObject = 0;
 
 			glDeleteBuffers(vertexBufferObject);
-			vertexBufferObject = 0;
+			vertexBufferObject = 0;*/
 		}
 
 		public void copyInterfaceTextureToGpu(int canvasWidth, int canvasHeight) {
+			/*
 			if (canvasWidth != this.canvasWidth || canvasHeight != this.canvasHeight) {
 				this.canvasWidth  = canvasWidth;
 				this.canvasHeight = canvasHeight;
@@ -187,17 +240,24 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			}
 			glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 			glBindTexture(GL_TEXTURE_2D, 0);
+			 */
 		}
 	}
-
-	private int interfaceProgram; // TODO: Refactor
 
 	private static String pointerToString(Pointer<Byte> b) {
 		return b.getString(Pointer.StringType.C);
 	}
 
 	public class AdapterRequester extends WGPURequestAdapterCallback {
-
+		private ArrayList<WGPUAdapter> adapters = new ArrayList<>();
+		public ArrayList<WGPUAdapter> getAdapters(WGPUInstance instance) {
+			WGPURequestAdapterOptions options = new WGPURequestAdapterOptions();
+			options.powerPreference(WGPUPowerPreference.WGPUPowerPreference_HighPerformance);
+			wgpuInstanceRequestAdapter(instance, Pointer.getPointer(options), adapterRequester.toPointer(), Pointer.NULL);
+			var result = (ArrayList<WGPUAdapter>) adapters.clone();
+			adapters.clear();
+			return result;
+		}
 		@Override
 		public void apply(IntValuedEnum<WGPURequestAdapterStatus> status, WGPUAdapter adapter, Pointer<Byte> message, Pointer<?> userdata) {
 			WGPUAdapterProperties properties = new WGPUAdapterProperties();
@@ -207,13 +267,168 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			log.info(String.format("\tVendor Name: %s", pointerToString(properties.vendorName())));
 			log.info(String.format("\tVendor Id: %d", properties.vendorID()));
 			log.info(String.format("\tArchitecture: %s", pointerToString(properties.architecture())));
-			log.info(String.format("\tVendor Name: %d", properties.deviceID()));
+			log.info(String.format("\tDevice Id: %d", properties.deviceID()));
+			log.info(String.format("\tDriver Description: %s", pointerToString(properties.driverDescription())));
 			log.info(String.format("\tType: %s", properties.adapterType().toString()));
-			log.info(String.format("\tChosen Backend: %s", properties.backendType().toString()));
+			log.info(String.format("\tBackend Type: %s", properties.backendType().toString()));
+			log.info("Adapter status: " + status);
+			adapters.add(adapter);
+		}
+	}
+
+	public class DeviceRequester extends WGPURequestDeviceCallback {
+		private WGPUDevice device;
+		@Override
+		public void apply(IntValuedEnum<WGPURequestDeviceStatus> status, WGPUDevice device, Pointer<Byte> message, Pointer<?> userdata) {
+			log.info("Device status: " + status);
+			this.device = device;
+		}
+
+		public WGPUDevice getDevice(WGPUAdapter adapter) {
+			wgpuAdapterRequestDevice(adapter, null, deviceRequester.toPointer(), null);
+			return device;
 		}
 	}
 
 	AdapterRequester adapterRequester = new AdapterRequester();
+	DeviceRequester deviceRequester = new DeviceRequester();
+
+	public class LogCallbacker extends WGPULogCallback {
+
+		@Override
+		public void apply(IntValuedEnum<WGPULogLevel> level, Pointer<Byte> message, Pointer<?> userdata) {
+			String messageString = message.getString(Pointer.StringType.C);
+			if (level == WGPULogLevel.WGPULogLevel_Error) {
+				log.error(String.format("WGPU(%s): %s", level, messageString));
+			} else {
+				log.info(String.format("WGPU(%s): %s", level, messageString));
+			}
+
+		}
+	}
+
+	LogCallbacker logCallbacker = new LogCallbacker();
+
+	public class DeviceCallbacker extends WGPUErrorCallback {
+
+		@Override
+		public void apply(IntValuedEnum<WGPUErrorType> type, Pointer<Byte> message, Pointer<?> userdata) {
+			String messageString = message.getString(Pointer.StringType.C);
+			log.error(String.format("WGPU(%s): %s", type, messageString));
+		}
+	}
+	DeviceCallbacker deviceCallbacker = new DeviceCallbacker();
+
+	public class QueueWorkDoneCallbacker extends WGPUQueueWorkDoneCallback {
+
+		@Override
+		public void apply(IntValuedEnum<WGPUQueueWorkDoneStatus> status, Pointer<?> userdata) {
+			log.info("Queue work done. Status:" + status);
+		}
+	}
+
+	QueueWorkDoneCallbacker queueWorkDoneCallbacker = new QueueWorkDoneCallbacker();
+
+	private boolean displayStorageReport(String apiName, String name, WGPURegistryReport report, StringBuilder sb, String prefix) {
+		if (report.numAllocated() > 0) {
+			sb.append(String.format("%s%s ERROR: Unreleased resource %s count=%d\n", prefix, apiName, name, report.numAllocated()));
+			return true;
+		}
+		return false;
+	}
+
+	private void wgpuGenerateAllocationReport(WGPUHubReport hubReport, String name) {
+		StringBuilder sb = new StringBuilder();
+		boolean hasUnreleased = false;
+		hasUnreleased |= displayStorageReport(name, "adapters", hubReport.adapters(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "devices", hubReport.devices(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "pipeline_layouts", hubReport.pipelineLayouts(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "shader_modules", hubReport.shaderModules(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "bind_group_layouts", hubReport.bindGroupLayouts(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "bind_groups", hubReport.bindGroups(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "command_buffers", hubReport.commandBuffers(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "render_bundles", hubReport.renderBundles(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "render_pipelines", hubReport.renderPipelines(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "compute_pipelines", hubReport.computePipelines(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "buffers", hubReport.buffers(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "textures", hubReport.textures(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "texture_views", hubReport.textureViews(), sb, "\t");
+		hasUnreleased |= displayStorageReport(name, "samplers", hubReport.samplers(), sb, "\t");
+		if (hasUnreleased) {
+			log.error("Unreleased resources:\n" + sb);
+		}
+	}
+
+	@Override
+	protected void shutDown()
+	{
+		clientThread.invoke(() -> {
+			var scene = client.getScene();
+			if (scene != null)
+				scene.setMinLevel(0);
+
+			client.setGpuFlags(0);
+			client.setDrawCallbacks(null);
+			client.setUnlockedFps(false);
+			client.setExpandedMapLoading(0);
+
+			/*developerTools.deactivate();
+			modelPusher.shutDown();
+			tileOverrideManager.shutDown();
+			groundMaterialManager.shutDown();
+			modelOverrideManager.shutDown();
+			lightManager.shutDown();
+			environmentManager.shutDown();
+			fishingSpotReplacer.shutDown();
+			areaManager.shutDown();*/
+
+
+			if (webgpuInitialized) {
+				webgpuInitialized = false;
+				waitUntilIdle();
+			}
+
+			if (interfaceStuff != null) interfaceStuff.destroy();
+
+			if (awtContext != null)
+				awtContext.destroy();
+			awtContext = null;
+
+			if (surfaceStuff != null)
+				surfaceStuff.destroy();
+			surfaceStuff = null;
+			if (queue.get() != null)
+				wgpuQueueRelease(queue);
+			queue = null;
+			if (device.get() != null)
+				wgpuDeviceRelease(device);
+			device = null;
+			if (adapter.get() != null)
+				wgpuAdapterRelease(adapter);
+			adapter = null;
+
+
+			{
+				WGPUGlobalReport report = new WGPUGlobalReport();
+				wgpuGenerateReport(instance, Pointer.getPointer(report));
+				wgpuGenerateAllocationReport(report.dx12(), "DX12");
+				wgpuGenerateAllocationReport(report.vulkan(), "Vulkan");
+				wgpuGenerateAllocationReport(report.metal(), "Metal");
+				wgpuGenerateAllocationReport(report.gl(), "OpenGL");
+			}
+
+			if (instance.get() != null)
+				wgpuInstanceRelease(instance);
+			instance = null;
+
+			// force main buffer provider rebuild to turn off alpha channel
+			client.resizeCanvas();
+
+			// Force the client to reload the scene to reset any scene modifications we may have made
+			if (client.getGameState() == GameState.LOGGED_IN)
+				client.setGameState(GameState.LOADING);
+		});
+	}
 
 	@Override
 	protected void startUp()
@@ -232,98 +447,87 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 					awtContext.configurePixelFormat(0, 0, 0);
 				}
 
-				awtContext.createGLContext();
+				//awtContext.createGLContext();
 
 				int version = MyLibrary.INSTANCE.wgpuGetVersion();
 				log.info("wgpu VERSION: " + version);
 
 				canvas.setIgnoreRepaint(true);
 
-				{
-					String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/wgpu_native.dll").getPath();
-					File dllFile = new File(dllPath);
-					BridJ.setNativeLibraryFile("wgpu", dllFile);
-					BridJ.register();
+				String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/wgpu_native.dll").getPath();
+				File dllFile = new File(dllPath);
+				BridJ.setNativeLibraryFile("wgpu", dllFile);
+				BridJ.register();
 
-					log.info("Loaded wgpu. Version:" + wgpuGetVersion());
+				wgpuSetLogCallback(logCallbacker.toPointer(), Pointer.NULL);
+				log.info("Set log callback");
 
-					WGPUInstanceDescriptor descriptor = new WGPUInstanceDescriptor();
-					WgpuLibrary.WGPUInstance instance = wgpuCreateInstance(Pointer.getPointer(descriptor));
+				log.info("Loaded wgpu. Version:" + wgpuGetVersion());
 
-					log.info("got instance? " + (instance.get() != null));
-					WGPUSurfaceDescriptorFromWindowsHWND windowsDescriptor = WindowsUtils.getWindowsSurfaceDescriptor(clientUI);
-					WGPUSurfaceDescriptor surfaceDescriptor = new WGPUSurfaceDescriptor();
-
-					surfaceDescriptor.nextInChain(Pointer.getPointer(windowsDescriptor).as(WGPUChainedStruct.class));
-					WGPUSurface surface = wgpuInstanceCreateSurface(instance, Pointer.getPointer(surfaceDescriptor));
-					log.info("created surface");
-
-					log.info("Requesting adapters...");
-					WGPURequestAdapterOptions options = new WGPURequestAdapterOptions();
-					wgpuInstanceRequestAdapter(instance, Pointer.getPointer(options), adapterRequester.toPointer(), Pointer.NULL);
-					log.info("Requested adapters");
-
-					wgpuSurfaceRelease(surface);
-					wgpuInstanceRelease(instance);
-					if(true) return true;
-
-				}
-
-				// lwjgl defaults to lwjgl- + user.name, but this breaks if the username would cause an invalid path
-				// to be created.
-				Configuration.SHARED_LIBRARY_EXTRACT_DIRECTORY.set("lwjgl-rl");
-
-				glCaps = GL.createCapabilities();
-
-				String glRenderer = glGetString(GL_RENDERER);
-				String arch = System.getProperty("sun.arch.data.model", "Unknown");
-				if (glRenderer == null)
-					glRenderer = "Unknown";
-				log.info("Using device: {}", glRenderer);
-				log.info("Using driver: {}", glGetString(GL_VERSION));
-				log.info("Client is {}-bit", arch);
-
-				List<String> fallbackDevices = List.of(
-						"GDI Generic",
-						"D3D12 (Microsoft Basic Render Driver)",
-						"softpipe"
-				);
-				boolean isFallbackGpu = fallbackDevices.contains(glRenderer);
-				boolean isUnsupportedGpu = isFallbackGpu || (!glCaps.OpenGL43);
-				if (isUnsupportedGpu) {
-					log.error(
-							"The GPU is lacking OpenGL 4.3 support. Stopping the plugin..."
-					);
-					// TODO: displayUnsupportedGpuMessage(isFallbackGpu, glRenderer);
-					stopPlugin();
+				WGPUInstanceDescriptor descriptor = new WGPUInstanceDescriptor();
+				instance = wgpuCreateInstance(Pointer.getPointer(descriptor));
+				if (instance.get() == null) {
+					log.error("Unable to get instance");
 					return true;
 				}
 
-				lwjglInitialized = true;
-				checkGLErrors();
-
-				if (log.isDebugEnabled() && glCaps.glDebugMessageControl != 0) {
-					debugCallback = GLUtil.setupDebugMessageCallback();
-					if (debugCallback != null) {
-						//	GLDebugEvent[ id 0x20071
-						//		type Warning: generic
-						//		severity Unknown (0x826b)
-						//		source GL API
-						//		msg Buffer detailed info: Buffer object 11 (bound to GL_ARRAY_BUFFER_ARB, and GL_SHADER_STORAGE_BUFFER (4), usage hint is GL_STREAM_DRAW) will use VIDEO memory as the source for buffer object operations.
-						glDebugMessageControl(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_OTHER,
-								GL_DONT_CARE, 0x20071, false
-						);
-
-						//	GLDebugMessageHandler: GLDebugEvent[ id 0x20052
-						//		type Warning: implementation dependent performance
-						//		severity Medium: Severe performance/deprecation/other warnings
-						//		source GL API
-						//		msg Pixel-path performance warning: Pixel transfer is synchronized with 3D rendering.
-						glDebugMessageControl(GL_DEBUG_SOURCE_API, GL_DEBUG_TYPE_PERFORMANCE,
-								GL_DONT_CARE, 0x20052, false
-						);
-					}
+				surfaceStuff = new SurfaceStuff(instance);
+				if (surfaceStuff.surface.get() == null) {
+					log.error("Unable to get surface");
+					return true;
 				}
+				log.info("created surface");
+
+				ArrayList<WGPUAdapter> adapters = adapterRequester.getAdapters(instance);
+				if (adapters.size() <= 0) {
+					log.error("Unable to get adapters");
+					return true;
+				}
+
+				for(WGPUAdapter adapter : adapters) {
+					this.adapter = adapter;
+					break; // Just grab the first one for now
+				}
+				log.info("Got adapter");
+
+				/*WGPUSurfaceCapabilities capabilities = new WGPUSurfaceCapabilities();
+				wgpuSurfaceGetCapabilities(surfaceStuff.surface, adapter, Pointer.getPointer(capabilities));
+				log.info("created wgpuSurfaceGetCapabilities");
+
+				log.info("formatCount: " + capabilities.formatCount());
+				log.info("presentModeCount: " + capabilities.presentModeCount());
+				log.info("alphaModeCount: " + capabilities.alphaModeCount());
+
+				for(int i = 0; i < capabilities.formatCount(); i++) {
+					var format = capabilities.formats().get(i);
+					log.info("we got a format yo: " + format);
+				}
+
+				for(int i = 0; i < capabilities.alphaModeCount(); i++) {
+					var alphaMode = capabilities.alphaModes().get(i);
+					log.info("we got a alphaMode yo: " + alphaMode);
+				}*/
+
+				device = deviceRequester.getDevice(adapter);
+				if (device.get() == null) {
+					log.error("Unable to get device");
+					return true;
+				}
+				log.info("Got device");
+
+				wgpuDeviceSetUncapturedErrorCallback(device, deviceCallbacker.toPointer(), Pointer.NULL);
+
+				queue = wgpuDeviceGetQueue(device);
+				if (queue.get() == null) {
+					log.error("Unable to get queue");
+					return true;
+				}
+				log.info("Got queue");
+
+				wgpuQueueOnSubmittedWorkDone(queue, queueWorkDoneCallbacker.toPointer(), Pointer.NULL);
+
+				if (client.getGameState() == GameState.LOGGED_IN)
+					client.setGameState(GameState.LOADING);
 
 				client.setDrawCallbacks(this);
 				client.setGpuFlags(
@@ -336,16 +540,13 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				// force rebuild of main buffer provider to enable alpha channel
 				client.resizeCanvas();
 
-				// We need to force the client to reload the scene since we're changing GPU flags
-				if (client.getGameState() == GameState.LOGGED_IN)
-					client.setGameState(GameState.LOADING);
-
-				checkGLErrors();
-
 				setupSyncMode();
 
-				interfaceStuff = new InterfaceStuff();
+				webgpuInitialized = true;
 
+				// interfaceStuff = new InterfaceStuff();
+
+				/*
 				{ // TODO: refactor
 					String vertexSource = null;
 					String fragmentSource = null;
@@ -404,9 +605,9 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 					glUseProgram(0);
 				}
 
+				checkGLErrors();*/
 				lastFrameTimeMillis = System.currentTimeMillis();
-
-				checkGLErrors();
+				waitUntilIdle();
 			}
 			catch (Throwable err)
 			{
@@ -417,7 +618,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		});
 	}
 
-	boolean linkProgram(int program) { // TODO: Refactor
+	/*boolean linkProgram(int program) { // TODO: Refactor
 		// NOTE: Assumes that you've already attached shaders to this program (glAttachShader)
 		glLinkProgram(interfaceProgram);
 		int[] isLinked = new int[1];
@@ -444,90 +645,15 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			return false;
 		}
 		return true;
-	}
+	}*/
 
-
-	@Override
-	protected void shutDown()
-	{
-		clientThread.invoke(() -> {
-			var scene = client.getScene();
-			if (scene != null)
-				scene.setMinLevel(0);
-
-			client.setGpuFlags(0);
-			client.setDrawCallbacks(null);
-			client.setUnlockedFps(false);
-			client.setExpandedMapLoading(0);
-
-			/*developerTools.deactivate();
-			modelPusher.shutDown();
-			tileOverrideManager.shutDown();
-			groundMaterialManager.shutDown();
-			modelOverrideManager.shutDown();
-			lightManager.shutDown();
-			environmentManager.shutDown();
-			fishingSpotReplacer.shutDown();
-			areaManager.shutDown();*/
-
-			if (lwjglInitialized) {
-				lwjglInitialized = false;
-				waitUntilIdle();
-
-				if (interfaceStuff != null) interfaceStuff.destroy();
-
-				glDeleteProgram(interfaceProgram);
-
-				/*textureManager.shutDown();
-
-				destroyBuffers();
-
-				destroyPrograms();
-				destroyVaos();
-				destroySceneFbo();
-				destroyShadowMapFbo();
-				destroyTileHeightMap();
-				destroyModelSortingBins();
-
-				openCLManager.shutDown();*/
-			}
-
-			if (awtContext != null)
-				awtContext.destroy();
-			awtContext = null;
-
-			if (debugCallback != null)
-				debugCallback.free();
-			debugCallback = null;
-
-			/*if (sceneContext != null)
-				sceneContext.destroy();
-			sceneContext = null;
-
-			synchronized (this) {
-				if (nextSceneContext != null)
-					nextSceneContext.destroy();
-				nextSceneContext = null;
-			}
-
-			if (modelPassthroughBuffer != null)
-				modelPassthroughBuffer.destroy();
-			modelPassthroughBuffer = null;*/
-
-			// force main buffer provider rebuild to turn off alpha channel
-			client.resizeCanvas();
-
-			// Force the client to reload the scene to reset any scene modifications we may have made
-			if (client.getGameState() == GameState.LOGGED_IN)
-				client.setGameState(GameState.LOADING);
-		});
-	}
 
 	private void setupSyncMode()
 	{
 		final boolean unlockFps = config.unlockFps();
 		client.setUnlockedFps(unlockFps);
-
+		client.setUnlockedFpsTarget(0); // TODO: fix this lol
+/*
 		int swapInterval;
 
 		if (unlockFps) {
@@ -542,45 +668,14 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		}
 
 		client.setUnlockedFpsTarget(actualSwapInterval == 0 ? config.fpsTarget() : 0);
-		checkGLErrors();
-	}
-
-	public void checkGLErrors() {
-		if (!log.isDebugEnabled())
-			return;
-
-		while (true) {
-			int err = glGetError();
-			if (err == GL_NO_ERROR)
-				return;
-
-			String errStr;
-			switch (err) {
-				case GL_INVALID_ENUM:
-					errStr = "INVALID_ENUM";
-					break;
-				case GL_INVALID_VALUE:
-					errStr = "INVALID_VALUE";
-					break;
-				case GL_INVALID_OPERATION:
-					errStr = "INVALID_OPERATION";
-					break;
-				case GL_INVALID_FRAMEBUFFER_OPERATION:
-					errStr = "INVALID_FRAMEBUFFER_OPERATION";
-					break;
-				default:
-					errStr = String.valueOf(err);
-					break;
-			}
-
-			log.debug("glGetError:", new Exception(errStr));
-		}
+		*/
 	}
 
 	private void waitUntilIdle() {
-		//if (computeMode == ComputeMode.OPENCL)
-		//	openCLManager.finish();
-		glFinish();
+		boolean queueEmpty = false;
+		while (!queueEmpty) {
+			queueEmpty = wgpuDevicePoll(device, 1, (Pointer<WGPUWrappedSubmissionIndex>) Pointer.NULL) != 0;
+		}
 	}
 
 	public void stopPlugin()
@@ -630,15 +725,96 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 	}
 
+	static int xd = 0;
 	@Override
 	public void draw(int overlayColor) {
 		final GameState gameState = client.getGameState();
 		if (gameState == GameState.STARTING) {
 			return;
 		}
+		if (!webgpuInitialized) return;
+		System.out.println("Frame #"+xd++);
 
 		float deltaTime = (float) ((System.currentTimeMillis() - lastFrameTimeMillis) / 1000.);
 
+		final int canvasWidth = client.getCanvasWidth();
+		final int canvasHeight = client.getCanvasHeight();
+
+		surfaceStuff.configureSurface(device, adapter, canvasWidth, canvasHeight, false);
+
+		WGPUSurfaceTexture surfaceTexture = new WGPUSurfaceTexture();
+		wgpuSurfaceGetCurrentTexture(surfaceStuff.surface, Pointer.getPointer(surfaceTexture));
+		log.info("wgpuSurfaceGetCurrentTexture status:" + surfaceTexture.status());
+		if (surfaceTexture.status() == WGPUSurfaceGetCurrentTextureStatus.WGPUSurfaceGetCurrentTextureStatus_Outdated) {
+			waitUntilIdle();
+			surfaceStuff.destroy();
+			surfaceStuff = new SurfaceStuff(instance);
+			log.info("Surface outdated. Recreating swap chain...");
+			return;
+		} else if (surfaceTexture.status() != WGPUSurfaceGetCurrentTextureStatus.WGPUSurfaceGetCurrentTextureStatus_Success) {
+			log.info("surface returned status: " + surfaceTexture.status());
+			return;
+		}
+
+		WGPUTextureView targetView = getCurrentTextureView(surfaceTexture);
+
+		WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, (Pointer<WGPUCommandEncoderDescriptor>) Pointer.NULL);
+
+		var attachment = new WGPURenderPassColorAttachment();
+		attachment.view(targetView);
+		attachment.resolveTarget((WGPUTextureView) Pointer.NULL);
+		attachment.loadOp(WGPULoadOp.WGPULoadOp_Clear);
+		attachment.storeOp(WGPUStoreOp.WGPUStoreOp_Store);
+		var clearColor = new WGPUColor();
+		clearColor.r(1);
+		clearColor.g(0);
+		clearColor.b(1);
+		clearColor.a(1);
+		attachment.clearValue(clearColor);
+
+		var attachments = Pointer.allocateArray(WGPURenderPassColorAttachment.class, 1);
+		attachments.set(0, attachment);
+
+		WGPURenderPassDescriptor renderPassDescriptor = new WGPURenderPassDescriptor();
+		renderPassDescriptor.colorAttachmentCount(1);
+		renderPassDescriptor.colorAttachments(attachments);
+		renderPassDescriptor.depthStencilAttachment((Pointer<WGPURenderPassDepthStencilAttachment>) Pointer.NULL);
+		renderPassDescriptor.occlusionQuerySet((WGPUQuerySet) Pointer.NULL);
+		renderPassDescriptor.timestampWrites((Pointer<WGPURenderPassTimestampWrites>) Pointer.NULL);
+
+		var pass = wgpuCommandEncoderBeginRenderPass(encoder, Pointer.getPointer(renderPassDescriptor));
+		wgpuRenderPassEncoderEnd(pass);
+		wgpuRenderPassEncoderRelease(pass);
+		attachments.release();
+
+
+		/*var debugText = Pointer.pointerToCString("testing");
+		wgpuCommandEncoderInsertDebugMarker(encoder, debugText);
+		wgpuCommandEncoderInsertDebugMarker(encoder, debugText);
+		wgpuCommandEncoderInsertDebugMarker(encoder, debugText);
+		wgpuCommandEncoderInsertDebugMarker(encoder, debugText);
+		debugText.release();*/
+
+		WGPUCommandBuffer commandBuffer = wgpuCommandEncoderFinish(encoder, (Pointer<WGPUCommandBufferDescriptor>) Pointer.NULL);
+
+		var commandArray = Pointer.allocateArray(WGPUCommandBuffer.class, 1);
+		commandArray.set(0, commandBuffer);
+
+		wgpuQueueSubmit(queue, 1, commandArray);
+
+		commandArray.release();
+
+		wgpuSurfacePresent(surfaceStuff.surface);
+
+		wgpuCommandEncoderRelease(encoder);
+		wgpuCommandBufferRelease(commandBuffer);
+		wgpuTextureViewRelease(targetView);
+
+		wgpuDevicePoll(device, 0, (Pointer<WGPUWrappedSubmissionIndex>) Pointer.NULL);
+
+
+
+		/*
 		glClearColor(0f,0f,0f,1f); // TODO: Fog color
 		glClearDepthf(0);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -675,8 +851,8 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDisable(GL_BLEND);
 		}
-
-		try {
+		*/
+		/*try {
 			awtContext.swapBuffers();
 			//drawManager.processDrawComplete(this::screenshot);
 		} catch (RuntimeException ex) {
@@ -687,11 +863,26 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			}
 
 			log.error("Unable to swap buffers:", ex);
-		}
+		}*/
 
-		glBindFramebuffer(GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
+		/*glBindFramebuffer(GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
 
-		checkGLErrors();
+		checkGLErrors();*/
+	}
+
+	private static WGPUTextureView getCurrentTextureView(WGPUSurfaceTexture surfaceTexture) {
+		WGPUTextureViewDescriptor viewDescriptor = new WGPUTextureViewDescriptor();
+		viewDescriptor.nextInChain((Pointer<WGPUChainedStruct>) Pointer.NULL);
+		viewDescriptor.label((Pointer<Byte>) Pointer.NULL);
+		viewDescriptor.format(wgpuTextureGetFormat(surfaceTexture.texture()));
+		viewDescriptor.dimension(WGPUTextureViewDimension.WGPUTextureViewDimension_2D);
+		viewDescriptor.baseMipLevel(0);
+		viewDescriptor.mipLevelCount(1);
+		viewDescriptor.baseArrayLayer(0);
+		viewDescriptor.arrayLayerCount(1);
+		viewDescriptor.aspect(WGPUTextureAspect.WGPUTextureAspect_All);
+		WGPUTextureView targetView = wgpuTextureCreateView(surfaceTexture.texture(), Pointer.getPointer(viewDescriptor));
+		return targetView;
 	}
 
 	@Override

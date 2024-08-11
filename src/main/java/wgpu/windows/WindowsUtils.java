@@ -1,9 +1,13 @@
 package wgpu.windows;
 
+import com.sun.jna.Native;
 import com.sun.jna.platform.win32.Kernel32;
+import com.sun.jna.platform.win32.User32;
 import com.sun.jna.platform.win32.WinDef;
+import com.sun.jna.platform.win32.WinUser;
 import net.runelite.client.ui.ClientUI;
 import net.runelite.client.ui.ContainableFrame;
+import net.runelite.rlawt.AWTContext;
 import org.bridj.JNI;
 import org.bridj.Pointer;
 import org.bridj.PointerIO;
@@ -12,10 +16,12 @@ import wgpu.WGPUSurfaceDescriptorFromWindowsHWND;
 import wgpu.WgpuLibrary;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 
 public class WindowsUtils {
 
-    public static WGPUSurfaceDescriptorFromWindowsHWND getWindowsSurfaceDescriptor(ClientUI ui) {
+    public static WGPUSurfaceDescriptorFromWindowsHWND getWindowsSurfaceDescriptor(ClientUI ui, AWTContext context) {
 
         // Grab the frame from the client UI
         ContainableFrame frame;
@@ -29,20 +35,24 @@ public class WindowsUtils {
         assert frame != null;
 
         WGPUSurfaceDescriptorFromWindowsHWND result = new WGPUSurfaceDescriptorFromWindowsHWND();
-        // Frame pointer is an HWND
-        Pointer<?> framePointer = JNI.getGlobalPointer(frame);
-        result.hwnd(framePointer);
 
-        Kernel32 kernel32 = Kernel32.INSTANCE;
-        WinDef.HMODULE hmodule = kernel32.GetModuleHandle("");
-        long hmodulePointerLong = hmodule == null ? 0 : com.sun.jna.Pointer.nativeValue(hmodule.getPointer());
+        { // Set HWND
+            WinDef.HWND hwnd = new WinDef.HWND(Native.getComponentPointer(frame));
+            long hwndPointerValue = com.sun.jna.Pointer.nativeValue(hwnd.getPointer());
+            System.out.println("hwndPointerValue:" + hwndPointerValue);
 
-        result.hinstance(Pointer.pointerToAddress(hmodulePointerLong, (PointerIO<?>) null));
+            result.hwnd(Pointer.pointerToAddress(hwndPointerValue));
+        }
 
-        WGPUChainedStruct chainedStruct = new WGPUChainedStruct();
-        chainedStruct.sType(WgpuLibrary.WGPUSType.WGPUSType_SurfaceDescriptorFromWindowsHWND);
-        result.chain(chainedStruct);
+        { // Set HINSTANCE
+            Kernel32 kernel32 = Kernel32.INSTANCE;
+            WinDef.HMODULE hmodule = kernel32.GetModuleHandle(null);
+            var hinstance = (WinDef.HINSTANCE)(hmodule);
+            long hinstancePtrValue = com.sun.jna.Pointer.nativeValue(hinstance.getPointer());
+            result.hinstance(Pointer.pointerToAddress(hinstancePtrValue));
+        }
 
+        result.chain().sType(WgpuLibrary.WGPUSType.WGPUSType_SurfaceDescriptorFromWindowsHWND);
         return result;
     }
 }
