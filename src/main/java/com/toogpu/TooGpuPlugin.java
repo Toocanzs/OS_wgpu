@@ -40,7 +40,7 @@ import javax.swing.SwingUtilities;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.ui.ClientUI;
-import net.runelite.rlawt.AWTContext;
+//import net.runelite.rlawt.AWTContext;
 import org.bridj.BridJ;
 import org.bridj.IntValuedEnum;
 import org.bridj.Pointer;
@@ -54,12 +54,12 @@ import java.nio.ByteBuffer;
 import java.nio.FloatBuffer;
 import java.util.ArrayList;
 
-import wgpu.*;
-import wgpu.windows.WindowsUtils;
+import webgpu.*;
+import webgpu.windows.WindowsUtils;
 
 //import static org.lwjgl.opengl.GL11C.glBindTexture;
 //import static org.lwjgl.opengl.GL43C.*;
-import static wgpu.WgpuLibrary.*;
+import static webgpu.WebgpuLibrary.*;
 
 @Slf4j
 @PluginDescriptor(
@@ -85,7 +85,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	//public GLCapabilities glCaps;
 
 	private Canvas canvas;
-	private AWTContext awtContext;
+	//private AWTContext awtContext;
 	private boolean webgpuInitialized;
 	//private Callback debugCallback;
 
@@ -98,10 +98,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		public int surfaceWidth;
 		public int surfaceHeight;
 
-		public SurfaceStuff(WGPUInstance instance) {
+		public SurfaceStuff(WGPUInstance instance, Canvas canvas) {
 			surfaceHeight = 0;
 			surfaceWidth = 0;
-			WGPUSurfaceDescriptorFromWindowsHWND windowsDescriptor = WindowsUtils.getWindowsSurfaceDescriptor(clientUI, awtContext);
+			WGPUSurfaceDescriptorFromWindowsHWND windowsDescriptor = WindowsUtils.getWindowsSurfaceDescriptorCanvas(canvas);
 			WGPUSurfaceDescriptor surfaceDescriptor = new WGPUSurfaceDescriptor();
 			surfaceDescriptor.nextInChain(Pointer.getPointer(windowsDescriptor).as(WGPUChainedStruct.class));
 
@@ -111,13 +111,13 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		public void configureSurface(WGPUDevice device, WGPUAdapter adapter, int canvasWidth, int canvasHeight, boolean forceReconfigure) {
 			boolean changedSize = surfaceWidth != canvasWidth || surfaceHeight != canvasHeight;
 			if (changedSize || forceReconfigure) {
-				IntValuedEnum<WGPUTextureFormat> preferredFormat = wgpuSurfaceGetPreferredFormat(surface, adapter);
+				IntValuedEnum<WGPUTextureFormat> preferredFormat = wgpuSurfaceGetPreferredFormat(surface, adapter); // TODO: GetPreferredFormat is deprecated, use GetCapabilities().format[0] instead as the preferred format.
 				log.info("preferredFormat=" + preferredFormat);
 
 				WGPUSurfaceConfiguration configuration = new WGPUSurfaceConfiguration();
 				configuration.device(device);
 				configuration.format(preferredFormat);
-				configuration.usage((int) WGPUTextureUsage.WGPUTextureUsage_RenderAttachment.value);
+				configuration.usage((int) WGPUTextureUsage_RenderAttachment);
 				configuration.viewFormatCount(0);
 				configuration.viewFormats((Pointer<IntValuedEnum<WGPUTextureFormat>>)Pointer.NULL);
 				configuration.alphaMode(WGPUCompositeAlphaMode.WGPUCompositeAlphaMode_Auto);
@@ -261,7 +261,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		@Override
 		public void apply(IntValuedEnum<WGPURequestAdapterStatus> status, WGPUAdapter adapter, Pointer<Byte> message, Pointer<?> userdata) {
 			WGPUAdapterProperties properties = new WGPUAdapterProperties();
-			wgpuAdapterGetProperties(adapter, Pointer.getPointer(properties));
+			wgpuAdapterGetProperties(adapter, Pointer.getPointer(properties)); // TODO: GetProperties is deprecated, use GetInfo instead.
 
 			log.info(String.format("Adapter: %s", pointerToString(properties.name())));
 			log.info(String.format("\tVendor Name: %s", pointerToString(properties.vendorName())));
@@ -293,17 +293,16 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	AdapterRequester adapterRequester = new AdapterRequester();
 	DeviceRequester deviceRequester = new DeviceRequester();
 
-	public class LogCallbacker extends WGPULogCallback {
+	public class LogCallbacker extends WGPULoggingCallback {
 
 		@Override
-		public void apply(IntValuedEnum<WGPULogLevel> level, Pointer<Byte> message, Pointer<?> userdata) {
+		public void apply(IntValuedEnum<WGPULoggingType> type, Pointer<Byte> message, Pointer<?> userdata) {
 			String messageString = message.getString(Pointer.StringType.C);
-			if (level == WGPULogLevel.WGPULogLevel_Error) {
-				log.error(String.format("WGPU(%s): %s", level, messageString));
+			if (type == WGPULoggingType.WGPULoggingType_Error) {
+				log.error(String.format("WGPU(%s): %s", type, messageString));
 			} else {
-				log.info(String.format("WGPU(%s): %s", level, messageString));
+				log.info(String.format("WGPU(%s): %s", type, messageString));
 			}
-
 		}
 	}
 
@@ -329,41 +328,12 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 	QueueWorkDoneCallbacker queueWorkDoneCallbacker = new QueueWorkDoneCallbacker();
 
-	private boolean displayStorageReport(String apiName, String name, WGPURegistryReport report, StringBuilder sb, String prefix) {
-		if (report.numAllocated() > 0) {
-			sb.append(String.format("%s%s ERROR: Unreleased resource %s count=%d\n", prefix, apiName, name, report.numAllocated()));
-			return true;
-		}
-		return false;
-	}
-
-	private void wgpuGenerateAllocationReport(WGPUHubReport hubReport, String name) {
-		StringBuilder sb = new StringBuilder();
-		boolean hasUnreleased = false;
-		hasUnreleased |= displayStorageReport(name, "adapters", hubReport.adapters(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "devices", hubReport.devices(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "pipeline_layouts", hubReport.pipelineLayouts(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "shader_modules", hubReport.shaderModules(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "bind_group_layouts", hubReport.bindGroupLayouts(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "bind_groups", hubReport.bindGroups(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "command_buffers", hubReport.commandBuffers(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "render_bundles", hubReport.renderBundles(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "render_pipelines", hubReport.renderPipelines(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "compute_pipelines", hubReport.computePipelines(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "buffers", hubReport.buffers(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "textures", hubReport.textures(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "texture_views", hubReport.textureViews(), sb, "\t");
-		hasUnreleased |= displayStorageReport(name, "samplers", hubReport.samplers(), sb, "\t");
-		if (hasUnreleased) {
-			log.error("Unreleased resources:\n" + sb);
-		}
-	}
-
 	@Override
 	protected void shutDown()
 	{
 		clientThread.invoke(() -> {
 			var scene = client.getScene();
+			//canvas.setVisible(true);
 			if (scene != null)
 				scene.setMinLevel(0);
 
@@ -390,9 +360,9 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 			if (interfaceStuff != null) interfaceStuff.destroy();
 
-			if (awtContext != null)
+			/*if (awtContext != null)
 				awtContext.destroy();
-			awtContext = null;
+			awtContext = null;*/
 
 			if (surfaceStuff != null)
 				surfaceStuff.destroy();
@@ -406,16 +376,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			if (adapter.get() != null)
 				wgpuAdapterRelease(adapter);
 			adapter = null;
-
-
-			{
-				WGPUGlobalReport report = new WGPUGlobalReport();
-				wgpuGenerateReport(instance, Pointer.getPointer(report));
-				wgpuGenerateAllocationReport(report.dx12(), "DX12");
-				wgpuGenerateAllocationReport(report.vulkan(), "Vulkan");
-				wgpuGenerateAllocationReport(report.metal(), "Metal");
-				wgpuGenerateAllocationReport(report.gl(), "OpenGL");
-			}
 
 			if (instance.get() != null)
 				wgpuInstanceRelease(instance);
@@ -435,43 +395,47 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	{
 		clientThread.invoke(() -> {
 			try {
-				AWTContext.loadNatives();
+				//AWTContext.loadNatives();
 				canvas = client.getCanvas();
+				//canvas.setVisible(false); // TODO: we need to setup another canvas maybe? We're breaking everything when writing to this canvas
 
 				synchronized (canvas.getTreeLock()) {
 					// Delay plugin startup until the client's canvas is valid
 					if (!canvas.isValid())
 						return false;
 
-					awtContext = new AWTContext(canvas);
-					awtContext.configurePixelFormat(0, 0, 0);
+					//awtContext = new AWTContext(canvas);
+					//awtContext.configurePixelFormat(0, 0, 0);
 				}
 
 				//awtContext.createGLContext();
 
-				int version = MyLibrary.INSTANCE.wgpuGetVersion();
-				log.info("wgpu VERSION: " + version);
-
 				canvas.setIgnoreRepaint(true);
 
-				String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/wgpu_native.dll").getPath();
+				String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/webgpu_dawn.dll").getPath();
 				File dllFile = new File(dllPath);
-				BridJ.setNativeLibraryFile("wgpu", dllFile);
+				BridJ.setNativeLibraryFile("webgpu", dllFile);
 				BridJ.register();
 
-				wgpuSetLogCallback(logCallbacker.toPointer(), Pointer.NULL);
-				log.info("Set log callback");
-
-				log.info("Loaded wgpu. Version:" + wgpuGetVersion());
-
 				WGPUInstanceDescriptor descriptor = new WGPUInstanceDescriptor();
+
+				// Dawn specific stuff to make callbacks occur as soon as an error occurs instead of on wgpuDeviceTick
+				Pointer<Byte> toggleName = Pointer.pointerToCString("enable_immediate_error_handling");
+				WGPUDawnTogglesDescriptor toggles = new WGPUDawnTogglesDescriptor();
+				toggles.chain().next((Pointer<WGPUChainedStruct>) Pointer.NULL);
+				toggles.chain().sType(WGPUSType.WGPUSType_DawnTogglesDescriptor);
+				toggles.disabledToggleCount(0);
+				toggles.enabledToggleCount(1);
+				toggles.enabledToggles(Pointer.pointerToPointer(toggleName));
+
 				instance = wgpuCreateInstance(Pointer.getPointer(descriptor));
+				toggleName.release();
 				if (instance.get() == null) {
 					log.error("Unable to get instance");
 					return true;
 				}
 
-				surfaceStuff = new SurfaceStuff(instance);
+				surfaceStuff = new SurfaceStuff(instance, canvas);
 				if (surfaceStuff.surface.get() == null) {
 					log.error("Unable to get surface");
 					return true;
@@ -515,7 +479,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				}
 				log.info("Got device");
 
-				wgpuDeviceSetUncapturedErrorCallback(device, deviceCallbacker.toPointer(), Pointer.NULL);
+				wgpuDeviceSetLoggingCallback(device, logCallbacker.toPointer(), Pointer.NULL);
+				log.info("Set log callback");
+
+				wgpuDeviceSetUncapturedErrorCallback(device, deviceCallbacker.toPointer(), Pointer.NULL); // TODO: SetUncapturedErrorCallback is deprecated. Pass the callback in the device descriptor instead.
 
 				queue = wgpuDeviceGetQueue(device);
 				if (queue.get() == null) {
@@ -524,7 +491,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				}
 				log.info("Got queue");
 
-				wgpuQueueOnSubmittedWorkDone(queue, queueWorkDoneCallbacker.toPointer(), Pointer.NULL);
+				wgpuQueueOnSubmittedWorkDone(queue, queueWorkDoneCallbacker.toPointer(), Pointer.NULL); // TODO: Old OnSubmittedWorkDone APIs are deprecated. If using C please pass a CallbackInfo struct that has two userdatas. Otherwise, if using C++, please use templated helpers.
 
 				if (client.getGameState() == GameState.LOGGED_IN)
 					client.setGameState(GameState.LOADING);
@@ -672,10 +639,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	}
 
 	private void waitUntilIdle() {
-		boolean queueEmpty = false;
-		while (!queueEmpty) {
-			queueEmpty = wgpuDevicePoll(device, 1, (Pointer<WGPUWrappedSubmissionIndex>) Pointer.NULL) != 0;
-		}
+		wgpuDeviceTick(device); // TODO: I don't think this waits properly. We need like GPUFutures or something
 	}
 
 	public void stopPlugin()
@@ -725,7 +689,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 	}
 
-	static int xd = 0;
 	@Override
 	public void draw(int overlayColor) {
 		final GameState gameState = client.getGameState();
@@ -733,7 +696,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			return;
 		}
 		if (!webgpuInitialized) return;
-		System.out.println("Frame #"+xd++);
 
 		float deltaTime = (float) ((System.currentTimeMillis() - lastFrameTimeMillis) / 1000.);
 
@@ -744,11 +706,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 		WGPUSurfaceTexture surfaceTexture = new WGPUSurfaceTexture();
 		wgpuSurfaceGetCurrentTexture(surfaceStuff.surface, Pointer.getPointer(surfaceTexture));
-		log.info("wgpuSurfaceGetCurrentTexture status:" + surfaceTexture.status());
 		if (surfaceTexture.status() == WGPUSurfaceGetCurrentTextureStatus.WGPUSurfaceGetCurrentTextureStatus_Outdated) {
 			waitUntilIdle();
 			surfaceStuff.destroy();
-			surfaceStuff = new SurfaceStuff(instance);
+			surfaceStuff = new SurfaceStuff(instance, canvas);
 			log.info("Surface outdated. Recreating swap chain...");
 			return;
 		} else if (surfaceTexture.status() != WGPUSurfaceGetCurrentTextureStatus.WGPUSurfaceGetCurrentTextureStatus_Success) {
@@ -767,9 +728,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		attachment.storeOp(WGPUStoreOp.WGPUStoreOp_Store);
 		var clearColor = new WGPUColor();
 		clearColor.r(1);
-		clearColor.g(0);
+		clearColor.g((System.currentTimeMillis() / 1000.0) % 1);
 		clearColor.b(1);
 		clearColor.a(1);
+		attachment.depthSlice(0xFFFFFFFF);
 		attachment.clearValue(clearColor);
 
 		var attachments = Pointer.allocateArray(WGPURenderPassColorAttachment.class, 1);
@@ -810,7 +772,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		wgpuCommandBufferRelease(commandBuffer);
 		wgpuTextureViewRelease(targetView);
 
-		wgpuDevicePoll(device, 0, (Pointer<WGPUWrappedSubmissionIndex>) Pointer.NULL);
+		wgpuDeviceTick(device);
 
 
 
