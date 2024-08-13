@@ -40,7 +40,6 @@ import javax.swing.SwingUtilities;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.ui.ClientUI;
-//import net.runelite.rlawt.AWTContext;
 import org.bridj.BridJ;
 import org.bridj.IntValuedEnum;
 import org.bridj.Pointer;
@@ -85,9 +84,7 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	//public GLCapabilities glCaps;
 
 	private Canvas canvas;
-	//private AWTContext awtContext;
 	private boolean webgpuInitialized;
-	//private Callback debugCallback;
 
 	public InterfaceStuff interfaceStuff;
 	private long lastFrameTimeMillis;
@@ -360,10 +357,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 			if (interfaceStuff != null) interfaceStuff.destroy();
 
-			/*if (awtContext != null)
-				awtContext.destroy();
-			awtContext = null;*/
-
 			if (surfaceStuff != null)
 				surfaceStuff.destroy();
 			surfaceStuff = null;
@@ -387,6 +380,10 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			// Force the client to reload the scene to reset any scene modifications we may have made
 			if (client.getGameState() == GameState.LOGGED_IN)
 				client.setGameState(GameState.LOADING);
+
+			// Since we took over the whole canvas with webgpu, we need to destroy and recreate the native screen resources
+			canvas.removeNotify();
+			canvas.addNotify();
 		});
 	}
 
@@ -395,20 +392,13 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	{
 		clientThread.invoke(() -> {
 			try {
-				//AWTContext.loadNatives();
 				canvas = client.getCanvas();
-				//canvas.setVisible(false); // TODO: we need to setup another canvas maybe? We're breaking everything when writing to this canvas
 
 				synchronized (canvas.getTreeLock()) {
 					// Delay plugin startup until the client's canvas is valid
 					if (!canvas.isValid())
 						return false;
-
-					//awtContext = new AWTContext(canvas);
-					//awtContext.configurePixelFormat(0, 0, 0);
 				}
-
-				//awtContext.createGLContext();
 
 				canvas.setIgnoreRepaint(true);
 
@@ -620,22 +610,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		final boolean unlockFps = config.unlockFps();
 		client.setUnlockedFps(unlockFps);
 		client.setUnlockedFpsTarget(0); // TODO: fix this lol
-/*
-		int swapInterval;
-
-		if (unlockFps) {
-			swapInterval = -1;
-		} else {
-			swapInterval = 0;
-		}
-
-		int actualSwapInterval = awtContext.setSwapInterval(swapInterval);
-		if (actualSwapInterval != swapInterval) {
-			log.info("unsupported swap interval {}, got {}", swapInterval, actualSwapInterval);
-		}
-
-		client.setUnlockedFpsTarget(actualSwapInterval == 0 ? config.fpsTarget() : 0);
-		*/
 	}
 
 	private void waitUntilIdle() {
@@ -813,23 +787,8 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDisable(GL_BLEND);
 		}
-		*/
-		/*try {
-			awtContext.swapBuffers();
-			//drawManager.processDrawComplete(this::screenshot);
-		} catch (RuntimeException ex) {
-			// this is always fatal
-			if (!canvas.isValid()) {
-				// this might be AWT shutting down on VM shutdown, ignore it
-				return;
-			}
 
-			log.error("Unable to swap buffers:", ex);
-		}*/
-
-		/*glBindFramebuffer(GL_FRAMEBUFFER, awtContext.getFramebuffer(false));
-
-		checkGLErrors();*/
+		 */
 	}
 
 	private static WGPUTextureView getCurrentTextureView(WGPUSurfaceTexture surfaceTexture) {
