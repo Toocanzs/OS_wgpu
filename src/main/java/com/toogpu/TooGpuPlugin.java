@@ -90,6 +90,13 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	private long lastFrameTimeMillis;
 	private WGPUAdapter adapter;
 	private SurfaceStuff surfaceStuff;
+
+	static {
+		BridJ.setNativeLibraryActualName("webgpu", "webgpu_dawn.dll");
+		BridJ.addLibraryPath(TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64").getPath());
+		BridJ.register();
+	}
+
 	private class SurfaceStuff {
 		public WGPUSurface surface;
 		public int surfaceWidth;
@@ -108,7 +115,9 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		public void configureSurface(WGPUDevice device, WGPUAdapter adapter, int canvasWidth, int canvasHeight, boolean forceReconfigure) {
 			boolean changedSize = surfaceWidth != canvasWidth || surfaceHeight != canvasHeight;
 			if (changedSize || forceReconfigure) {
-				IntValuedEnum<WGPUTextureFormat> preferredFormat = wgpuSurfaceGetPreferredFormat(surface, adapter); // TODO: GetPreferredFormat is deprecated, use GetCapabilities().format[0] instead as the preferred format.
+				WGPUSurfaceCapabilities capabilities = new WGPUSurfaceCapabilities();
+				wgpuSurfaceGetCapabilities(surface, adapter, Pointer.getPointer(capabilities));
+				IntValuedEnum<WGPUTextureFormat> preferredFormat = capabilities.formats().get(0);
 				log.info("preferredFormat=" + preferredFormat);
 
 				WGPUSurfaceConfiguration configuration = new WGPUSurfaceConfiguration();
@@ -122,9 +131,18 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				surfaceWidth = canvasWidth;
 				configuration.height(canvasHeight);
 				surfaceHeight = canvasHeight;
-				configuration.presentMode(WGPUPresentMode.WGPUPresentMode_Fifo); // TODO: Get from config
+				final boolean unlockFps = config.unlockFps();
+				configuration.presentMode(unlockFps ? WGPUPresentMode.WGPUPresentMode_Mailbox : WGPUPresentMode.WGPUPresentMode_Fifo);
+				client.setUnlockedFps(unlockFps);
+				if (unlockFps) {
+					client.setUnlockedFpsTarget(0);
+				} else {
+					client.setUnlockedFpsTarget(config.fpsTarget());
+				}
+
 				wgpuSurfaceConfigure(surface, Pointer.getPointer(configuration));
 				log.info("Configured surface");
+				// wgpuSurfaceCapabilitiesFreeMembers(capabilities); // NOTE: BridJ can't pass structs by value so this dies? We're leaking memory here.
 			}
 		}
 
@@ -257,19 +275,22 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		}
 		@Override
 		public void apply(IntValuedEnum<WGPURequestAdapterStatus> status, WGPUAdapter adapter, Pointer<Byte> message, Pointer<?> userdata) {
-			WGPUAdapterProperties properties = new WGPUAdapterProperties();
-			wgpuAdapterGetProperties(adapter, Pointer.getPointer(properties)); // TODO: GetProperties is deprecated, use GetInfo instead.
 
-			log.info(String.format("Adapter: %s", pointerToString(properties.name())));
-			log.info(String.format("\tVendor Name: %s", pointerToString(properties.vendorName())));
-			log.info(String.format("\tVendor Id: %d", properties.vendorID()));
-			log.info(String.format("\tArchitecture: %s", pointerToString(properties.architecture())));
-			log.info(String.format("\tDevice Id: %d", properties.deviceID()));
-			log.info(String.format("\tDriver Description: %s", pointerToString(properties.driverDescription())));
-			log.info(String.format("\tType: %s", properties.adapterType().toString()));
-			log.info(String.format("\tBackend Type: %s", properties.backendType().toString()));
+			WGPUAdapterInfo info = new WGPUAdapterInfo();
+			wgpuAdapterGetInfo(adapter, Pointer.getPointer(info));
+
+			log.info(String.format("Adapter: %s", pointerToString(info.device())));
+			log.info(String.format("\tVendor Name: %s", pointerToString(info.vendor())));
+			log.info(String.format("\tVendor Id: %d", info.vendorID()));
+			log.info(String.format("\tArchitecture: %s", pointerToString(info.architecture())));
+			log.info(String.format("\tDevice Id: %d", info.deviceID()));
+			log.info(String.format("\tDescription: %s", pointerToString(info.description())));
+			log.info(String.format("\tType: %s", info.adapterType().toString()));
+			log.info(String.format("\tBackend Type: %s", info.backendType().toString()));
 			log.info("Adapter status: " + status);
 			adapters.add(adapter);
+
+			//wgpuAdapterInfoFreeMembers(info); // NOTE: BridJ can't pass structs by value so this dies? We're leaking memory here.
 		}
 	}
 
@@ -282,7 +303,13 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		}
 
 		public WGPUDevice getDevice(WGPUAdapter adapter) {
-			wgpuAdapterRequestDevice(adapter, null, deviceRequester.toPointer(), null);
+			WGPUDeviceDescriptor descriptor = new WGPUDeviceDescriptor();
+
+			WGPUUncapturedErrorCallbackInfo uncapturedErrorCallbackInfo = new WGPUUncapturedErrorCallbackInfo();
+			uncapturedErrorCallbackInfo.callback(deviceCallbacker.toPointer());
+			descriptor.uncapturedErrorCallbackInfo(uncapturedErrorCallbackInfo);
+
+			wgpuAdapterRequestDevice(adapter, Pointer.getPointer(descriptor), deviceRequester.toPointer(), null);
 			return device;
 		}
 	}
@@ -315,22 +342,11 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 	}
 	DeviceCallbacker deviceCallbacker = new DeviceCallbacker();
 
-	public class QueueWorkDoneCallbacker extends WGPUQueueWorkDoneCallback {
-
-		@Override
-		public void apply(IntValuedEnum<WGPUQueueWorkDoneStatus> status, Pointer<?> userdata) {
-			log.info("Queue work done. Status:" + status);
-		}
-	}
-
-	QueueWorkDoneCallbacker queueWorkDoneCallbacker = new QueueWorkDoneCallbacker();
-
 	@Override
 	protected void shutDown()
 	{
 		clientThread.invoke(() -> {
 			var scene = client.getScene();
-			//canvas.setVisible(true);
 			if (scene != null)
 				scene.setMinLevel(0);
 
@@ -402,11 +418,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 
 				canvas.setIgnoreRepaint(true);
 
-				String dllPath = TooGpuPlugin.class.getClassLoader().getResource("win32-x86-64/webgpu_dawn.dll").getPath();
-				File dllFile = new File(dllPath);
-				BridJ.setNativeLibraryFile("webgpu", dllFile);
-				BridJ.register();
-
 				WGPUInstanceDescriptor descriptor = new WGPUInstanceDescriptor();
 
 				// Dawn specific stuff to make callbacks occur as soon as an error occurs instead of on wgpuDeviceTick
@@ -472,16 +483,12 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				wgpuDeviceSetLoggingCallback(device, logCallbacker.toPointer(), Pointer.NULL);
 				log.info("Set log callback");
 
-				wgpuDeviceSetUncapturedErrorCallback(device, deviceCallbacker.toPointer(), Pointer.NULL); // TODO: SetUncapturedErrorCallback is deprecated. Pass the callback in the device descriptor instead.
-
 				queue = wgpuDeviceGetQueue(device);
 				if (queue.get() == null) {
 					log.error("Unable to get queue");
 					return true;
 				}
 				log.info("Got queue");
-
-				wgpuQueueOnSubmittedWorkDone(queue, queueWorkDoneCallbacker.toPointer(), Pointer.NULL); // TODO: Old OnSubmittedWorkDone APIs are deprecated. If using C please pass a CallbackInfo struct that has two userdatas. Otherwise, if using C++, please use templated helpers.
 
 				if (client.getGameState() == GameState.LOGGED_IN)
 					client.setGameState(GameState.LOADING);
@@ -496,8 +503,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 				// force rebuild of main buffer provider to enable alpha channel
 				client.resizeCanvas();
-
-				setupSyncMode();
 
 				webgpuInitialized = true;
 
@@ -603,14 +608,6 @@ public class TooGpuPlugin extends Plugin implements DrawCallbacks
 		}
 		return true;
 	}*/
-
-
-	private void setupSyncMode()
-	{
-		final boolean unlockFps = config.unlockFps();
-		client.setUnlockedFps(unlockFps);
-		client.setUnlockedFpsTarget(0); // TODO: fix this lol
-	}
 
 	private void waitUntilIdle() {
 		wgpuDeviceTick(device); // TODO: I don't think this waits properly. We need like GPUFutures or something
